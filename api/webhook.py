@@ -1,17 +1,12 @@
 from http.server import BaseHTTPRequestHandler
 import json
 import os
-import google.generativeai as genai
-
-# Configure Gemini API
-api_key = os.environ.get("GEMINI_API_KEY")
-if api_key:
-    genai.configure(api_key=api_key)
+import requests
 
 class handler(BaseHTTPRequestHandler):
     def do_POST(self):
         try:
-            # 1. Read the incoming webhook payload from the "Courier"
+            # 1. Read the incoming webhook payload from Postman
             content_length = int(self.headers.get('Content-Length', 0))
             post_data = self.rfile.read(content_length)
             payload = json.loads(post_data.decode('utf-8'))
@@ -20,26 +15,38 @@ class handler(BaseHTTPRequestHandler):
             awb = payload.get("awb", "UNKNOWN")
             customer_name = payload.get("customer_name", "Customer")
             reason_code = payload.get("reason_code", "Customer Unavailable")
+            api_key = os.environ.get("GEMINI_API_KEY")
 
-            # 2. Attempt to generate message via Gemini API using gemini-3.8-flash
             ai_message = ""
-            try:
-                if api_key:
-                    model = genai.GenerativeModel('gemini-3.8-flash')
-                    prompt = (
+
+            # 2. Direct REST API call (Super fast, zero SDK lag or hanging)
+            if api_key:
+                try:
+                    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+                    headers = {"Content-Type": "application/json"}
+                    prompt_text = (
                         f"You are an autonomous AI logistics recovery agent. "
                         f"A delivery failed for customer {customer_name}. Reason: {reason_code}. "
                         f"Draft a polite, concise, localized WhatsApp recovery message under 40 words."
                     )
-                    response = model.generate_content(prompt)
-                    ai_message = response.text.strip()
-                else:
-                    raise Exception("API key missing")
-            except Exception as api_err:
-                # Instant fallback so your demo never hangs during your presentation
-                ai_message = f"Hi {customer_name}, your delivery failed today due to {reason_code}. Shall we reattempt delivery tomorrow?"
+                    body = {
+                        "contents": [{
+                            "parts": [{"text": prompt_text}]
+                        }]
+                    }
+                    # 4-second hard timeout so it never hangs Postman
+                    response = requests.post(url, json=body, headers=headers, timeout=4)
+                    if response.status_code == 200:
+                        res_json = response.json()
+                        ai_message = res_json['candidates'][0]['content']['parts'][0]['text'].strip()
+                except Exception as api_err:
+                    pass
 
-            # 3. Formulate the success response back to Postman
+            # Fallback if API key is missing or request takes too long
+            if not ai_message:
+                ai_message = f"Hi {customer_name}, your delivery failed today due to {reason_code}. Shall we reattempt delivery tomorrow? Reply YES or update your address."
+
+            # 3. Formulate the instant success response back to Postman
             response_data = {
                 "status": "success",
                 "message": "NDR Agent successfully processed event",
