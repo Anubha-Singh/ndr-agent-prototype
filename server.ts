@@ -4,7 +4,13 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
-import type { AuditEvent, NdrRecord, ParsedInstruction } from './src/types/ndr.ts';
+import type {
+  AuditEvent,
+  NdrIntent,
+  NdrRecord,
+  ParsedInstruction,
+  ParsedIntelligence,
+} from './src/types/ndr.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -22,7 +28,14 @@ function createInitialRecords(): NdrRecord[] {
       courier: 'BlueDart Priority',
       hub: 'BLR-IND-04',
       failureReason: 'Consignee Gate Locked',
+      recoveryPrompt:
+        'Hi Vikramaditya Rao, your BlueDart delivery (BDX88412) missed delivery due to Consignee Gate Locked. When can we reattempt or where should we leave it?',
       rawReply: 'Security cabin is open after 6pm today, please drop it there.',
+      parsedIntelligence: {
+        intent: 'Alternate_Instruction',
+        new_date: 'Today (After 6 PM)',
+        special_instructions: 'Leave at security cabin',
+      },
       parsedInstructions: {
         Date: 'Today (After 6 PM)',
         Instruction: 'Leave at security cabin',
@@ -38,7 +51,10 @@ function createInitialRecords(): NdrRecord[] {
       courier: 'Delhivery Surface',
       hub: 'MUM-WST-02',
       failureReason: 'Phone Unreachable',
+      recoveryPrompt:
+        'Hi Ananya Deshmukh, we attempted your Delhivery package (DLV50219) today but your phone was unreachable. Reply with a preferred time or instructions.',
       rawReply: null,
+      parsedIntelligence: null,
       parsedInstructions: null,
       status: 'Action Required 🟡',
       updatedAt: '07:41 AM',
@@ -51,7 +67,14 @@ function createInitialRecords(): NdrRecord[] {
       courier: 'XpressBees Air',
       hub: 'DEL-NCR-07',
       failureReason: 'Address Incomplete',
+      recoveryPrompt:
+        'Hi Kabir Malhotra, your XpressBees shipment (XPR39104) paused due to Address Incomplete. Please share your flat/tower number and preferred slot.',
       rawReply: 'Tower B, Flat 1402. Reattempt tomorrow morning before 11.',
+      parsedIntelligence: {
+        intent: 'Reschedule',
+        new_date: 'Tomorrow (Before 11 AM)',
+        special_instructions: 'Deliver to Tower B 1402',
+      },
       parsedInstructions: {
         Date: 'Tomorrow (Before 11 AM)',
         Instruction: 'Deliver to Tower B 1402',
@@ -67,7 +90,10 @@ function createInitialRecords(): NdrRecord[] {
       courier: 'Shadowfax Same-Day',
       hub: 'HYD-CEN-01',
       failureReason: 'Customer Requested Reschedule',
+      recoveryPrompt:
+        'Hi Meera Nair, your Shadowfax order (SFX77301) is on hold per your reschedule request. Reply with the day and delivery instructions that work best.',
       rawReply: null,
+      parsedIntelligence: null,
       parsedInstructions: null,
       status: 'Action Required 🟡',
       updatedAt: '06:54 AM',
@@ -101,33 +127,82 @@ function getGenAIClient(): GoogleGenAI {
   });
 }
 
-async function parseReplyWithGemini(rawReply: string): Promise<ParsedInstruction> {
+async function draftRecoveryMessageWithGemini(
+  customerName: string,
+  reasonCode: string
+): Promise<string> {
+  const fallbackMessage = `Hi ${customerName}, your delivery failed today due to ${reasonCode}. Shall we reattempt delivery tomorrow? Reply YES or update your address.`;
+
+  if (!process.env.GEMINI_API_KEY) {
+    return fallbackMessage;
+  }
+
+  try {
+    const ai = getGenAIClient();
+    const timeoutPromise = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error('Recovery draft timeout')), 4500)
+    );
+
+    const response = await Promise.race([
+      ai.models.generateContent({
+        model: 'gemini-4-hydrogen',
+        contents: `A delivery failed for customer ${customerName}. Reason: ${reasonCode}. Draft a polite, concise, localized WhatsApp recovery message under 40 words.`,
+        config: {
+          systemInstruction:
+            'You are an autonomous AI logistics recovery agent. Return only the plain-text WhatsApp recovery message under 40 words, without markdown or quotes.',
+          thinkingConfig: {
+            thinkingLevel: ThinkingLevel.LOW,
+          },
+        },
+      }),
+      timeoutPromise,
+    ]);
+
+    const text = (response.text ?? '').trim();
+    return text || fallbackMessage;
+  } catch (error) {
+    console.warn('Recovery prompt fallback triggered:', error instanceof Error ? error.message : error);
+    return fallbackMessage;
+  }
+}
+
+async function parseReplyWithGemini(rawReply: string): Promise<{
+  parsedIntelligence: ParsedIntelligence;
+  parsedInstructions: ParsedInstruction;
+}> {
   const ai = getGenAIClient();
-  const maxAttempts = 3;
+  const maxAttempts = 2;
   let lastError: unknown = null;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
       const response = await ai.models.generateContent({
         model: 'gemini-4-hydrogen',
-        contents: `Customer WhatsApp reply: "${rawReply}"`,
+        contents: `Customer Reply: '${rawReply}'`,
         config: {
           systemInstruction:
-            "You are a logistics NDR (Non-Delivery Report) operations parser. Extract structured delivery re-attempt instructions from a messy customer WhatsApp reply. Return concise JSON with 'Date' (the target day or timeframe mentioned, e.g. 'Friday', 'Tomorrow', 'Monday', or 'Next Business Day' if none mentioned) and 'Instruction' (a crisp imperative delivery instruction in 2 to 5 words with sentence-case capitalization, e.g. 'Leave with guard').",
+            "You are a logistics NLP parser. A customer replied to a missed delivery text. Extract the intent and structured re-attempt fields. 'intent' must be one of 'Reschedule', 'Return_To_Origin', or 'Alternate_Instruction'. 'new_date' must extract the day/date if mentioned (e.g. 'Friday'), else null. 'special_instructions' must extract any specific delivery directions in 2 to 5 words with sentence-case capitalization (e.g. 'Leave with guard'), else null.",
           responseMimeType: 'application/json',
           responseSchema: {
             type: Type.OBJECT,
             properties: {
-              Date: {
+              intent: {
                 type: Type.STRING,
-                description: "The target delivery day or timeframe, e.g. 'Friday'.",
+                enum: ['Reschedule', 'Return_To_Origin', 'Alternate_Instruction'],
+                description: 'Must be Reschedule, Return_To_Origin, or Alternate_Instruction.',
               },
-              Instruction: {
+              new_date: {
                 type: Type.STRING,
-                description: "Concise delivery action in 2 to 5 words, e.g. 'Leave with guard'.",
+                nullable: true,
+                description: "Target day or date if mentioned (e.g. 'Friday'), else null.",
+              },
+              special_instructions: {
+                type: Type.STRING,
+                nullable: true,
+                description: "Concise delivery directions (e.g. 'Leave with guard'), else null.",
               },
             },
-            required: ['Date', 'Instruction'],
+            required: ['intent', 'new_date', 'special_instructions'],
           },
           thinkingConfig: {
             thinkingLevel: ThinkingLevel.LOW,
@@ -140,19 +215,51 @@ async function parseReplyWithGemini(rawReply: string): Promise<ParsedInstruction
         throw new Error('Gemini returned an empty response.');
       }
 
-      const parsed = JSON.parse(text) as Partial<ParsedInstruction>;
-      return {
-        Date: (parsed.Date || 'Next Business Day').trim(),
-        Instruction: (parsed.Instruction || 'Re-attempt delivery').trim(),
+      const parsed = JSON.parse(text) as {
+        intent?: string;
+        new_date?: string | null;
+        special_instructions?: string | null;
       };
+
+      const validIntents: NdrIntent[] = [
+        'Reschedule',
+        'Return_To_Origin',
+        'Alternate_Instruction',
+      ];
+      const intent: NdrIntent = validIntents.includes(parsed.intent as NdrIntent)
+        ? (parsed.intent as NdrIntent)
+        : 'Alternate_Instruction';
+
+      const newDate = parsed.new_date ? parsed.new_date.trim() : null;
+      const specialInstructions = parsed.special_instructions
+        ? parsed.special_instructions.trim()
+        : null;
+
+      const parsedIntelligence: ParsedIntelligence = {
+        intent,
+        new_date: newDate,
+        special_instructions: specialInstructions,
+      };
+
+      const parsedInstructions: ParsedInstruction = {
+        Date: newDate ?? 'Next Business Day',
+        Instruction: specialInstructions ?? intent.replace(/_/g, ' '),
+      };
+
+      return { parsedIntelligence, parsedInstructions };
     } catch (error) {
       lastError = error;
       const errText = error instanceof Error ? error.message : String(error);
-      const isTransient = errText.includes('503') || errText.includes('429') || errText.includes('UNAVAILABLE');
-      if (!isTransient || attempt === maxAttempts) {
+      if (errText.includes('429') || errText.includes('RESOURCE_EXHAUSTED')) {
+        throw new Error(
+          'Gemini API rate limit reached (5 requests/min on free tier). Please wait a few seconds and retry, or upgrade your API key quota in Settings > Secrets.'
+        );
+      }
+      const isTransient503 = errText.includes('503') || errText.includes('UNAVAILABLE');
+      if (!isTransient503 || attempt === maxAttempts) {
         break;
       }
-      await new Promise((resolve) => setTimeout(resolve, attempt * 600));
+      await new Promise((resolve) => setTimeout(resolve, 700));
     }
   }
 
@@ -170,19 +277,38 @@ async function startServer() {
     });
   });
 
-  app.post('/api/webhook/delivery-failure', (req, res) => {
-    const requestedAwb = typeof req.body?.awb === 'string' && req.body.awb.trim() ? req.body.awb.trim() : 'DEL12345';
+  const handleWebhookIngest = async (req: express.Request, res: express.Response) => {
+    const requestedAwb =
+      typeof req.body?.awb === 'string' && req.body.awb.trim()
+        ? req.body.awb.trim()
+        : 'DEL12345';
+    const customerName =
+      typeof req.body?.customer_name === 'string' && req.body.customer_name.trim()
+        ? req.body.customer_name.trim()
+        : 'Rohan Kapoor';
+    const reasonCode =
+      typeof req.body?.reason_code === 'string' && req.body.reason_code.trim()
+        ? req.body.reason_code.trim()
+        : 'Customer Unavailable';
+
+    const generatedWhatsappText = await draftRecoveryMessageWithGemini(
+      customerName,
+      reasonCode
+    );
+
     const existingIndex = ndrRecords.findIndex((item) => item.awb === requestedAwb);
 
     const newRecord: NdrRecord = {
       id: existingIndex >= 0 ? ndrRecords[existingIndex].id : `ndr-${Date.now()}`,
       awb: requestedAwb,
-      customer: 'Rohan Kapoor',
+      customer: customerName,
       phone: '+91 98450 61209',
       courier: 'Delhivery Express',
       hub: 'DEL-NCR-01',
-      failureReason: 'Customer Unavailable',
+      failureReason: reasonCode,
+      recoveryPrompt: generatedWhatsappText,
       rawReply: null,
+      parsedIntelligence: null,
       parsedInstructions: null,
       status: 'Action Required 🟡',
       updatedAt: formatTime(),
@@ -198,47 +324,71 @@ async function startServer() {
       timestamp: formatTime(),
       type: 'WEBHOOK_INGESTED',
       awb: newRecord.awb,
-      summary: `Carrier webhook ingested for ${newRecord.awb} (${newRecord.failureReason})`,
+      summary: `NDR Agent processed ${newRecord.awb} (${newRecord.failureReason}) and sent WhatsApp recovery prompt`,
       payload: {
-        event: 'delivery.failed',
+        status: 'success',
+        message: 'NDR Agent successfully processed event',
         awb: newRecord.awb,
-        courier: newRecord.courier,
-        reason: newRecord.failureReason,
-        status: newRecord.status,
+        generated_whatsapp_text: generatedWhatsappText,
+        action_taken: 'Sent automated recovery prompt to customer',
       },
     };
     auditEvents.unshift(event);
 
-    res.status(201).json({
+    res.status(200).json({
+      status: 'success',
+      message: 'NDR Agent successfully processed event',
+      awb: newRecord.awb,
+      generated_whatsapp_text: generatedWhatsappText,
+      action_taken: 'Sent automated recovery prompt to customer',
       record: newRecord,
       records: ndrRecords,
       auditEvents,
     });
-  });
+  };
+
+  app.post('/api/webhook/delivery-failure', handleWebhookIngest);
+  app.post('/api/webhook', handleWebhookIngest);
 
   app.post('/api/parse-reply', async (req, res) => {
     const awb = typeof req.body?.awb === 'string' ? req.body.awb.trim() : '';
-    const rawReply = typeof req.body?.rawReply === 'string' ? req.body.rawReply.trim() : '';
+    const rawReplyInput =
+      typeof req.body?.customer_reply === 'string'
+        ? req.body.customer_reply
+        : typeof req.body?.rawReply === 'string'
+          ? req.body.rawReply
+          : '';
+    const customerReply = rawReplyInput.trim();
 
-    if (!awb || !rawReply) {
-      res.status(400).json({ error: 'Both awb and rawReply are required.' });
+    if (!awb || !customerReply) {
+      res.status(400).json({
+        status: 'error',
+        error: 'Both awb and customer_reply are required.',
+      });
       return;
     }
 
     const targetIndex = ndrRecords.findIndex((item) => item.awb === awb);
     if (targetIndex === -1) {
-      res.status(404).json({ error: `Shipment ${awb} was not found in the Live NDR Queue.` });
+      res.status(404).json({
+        status: 'error',
+        error: `Shipment ${awb} was not found in the Live NDR Queue.`,
+      });
       return;
     }
 
     try {
-      const parsedInstructions = await parseReplyWithGemini(rawReply);
+      const { parsedIntelligence, parsedInstructions } =
+        await parseReplyWithGemini(customerReply);
+
+      const newQueueStatus = 'Re-attempt Scheduled 🟢' as const;
 
       const updatedRecord: NdrRecord = {
         ...ndrRecords[targetIndex],
-        rawReply,
+        rawReply: customerReply,
+        parsedIntelligence,
         parsedInstructions,
-        status: 'Re-attempt Scheduled 🟢',
+        status: newQueueStatus,
         updatedAt: formatTime(),
       };
 
@@ -249,25 +399,32 @@ async function startServer() {
         timestamp: formatTime(),
         type: 'GEMINI_NLP_PARSED',
         awb: updatedRecord.awb,
-        summary: `Gemini extracted {Date: ${parsedInstructions.Date}, Instruction: ${parsedInstructions.Instruction}}`,
+        summary: `Parsed ${parsedIntelligence.intent} · {Date: ${parsedInstructions.Date}, Instruction: ${parsedInstructions.Instruction}}`,
         payload: {
+          status: 'success',
+          message: 'Customer reply parsed and mock DB updated',
           awb: updatedRecord.awb,
-          rawReply,
-          parsedInstructions,
-          newStatus: updatedRecord.status,
+          parsed_intelligence: parsedIntelligence,
+          new_queue_status: newQueueStatus,
         },
       };
       auditEvents.unshift(event);
 
       res.json({
+        status: 'success',
+        message: 'Customer reply parsed and mock DB updated',
+        awb: updatedRecord.awb,
+        parsed_intelligence: parsedIntelligence,
+        new_queue_status: newQueueStatus,
         record: updatedRecord,
         records: ndrRecords,
         auditEvents,
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to parse customer reply with Gemini.';
+      const message =
+        error instanceof Error ? error.message : 'Failed to parse customer reply with Gemini.';
       console.error('Gemini parse-reply error:', error);
-      res.status(502).json({ error: message });
+      res.status(502).json({ status: 'error', error: message });
     }
   });
 

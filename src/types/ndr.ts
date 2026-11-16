@@ -1,5 +1,13 @@
 export type NdrStatus = 'Action Required 🟡' | 'Re-attempt Scheduled 🟢';
 
+export type NdrIntent = 'Reschedule' | 'Return_To_Origin' | 'Alternate_Instruction';
+
+export interface ParsedIntelligence {
+  intent: NdrIntent;
+  new_date: string | null;
+  special_instructions: string | null;
+}
+
 export interface ParsedInstruction {
   Date: string;
   Instruction: string;
@@ -13,7 +21,9 @@ export interface NdrRecord {
   courier: string;
   hub: string;
   failureReason: string;
+  recoveryPrompt: string | null;
   rawReply: string | null;
+  parsedIntelligence: ParsedIntelligence | null;
   parsedInstructions: ParsedInstruction | null;
   status: NdrStatus;
   updatedAt: string;

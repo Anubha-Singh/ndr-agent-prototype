@@ -25,6 +25,7 @@ export default function App() {
   const [selectedRowAwb, setSelectedRowAwb] = useState<string | null>(null);
   const [highlightedAwb, setHighlightedAwb] = useState<string | null>(null);
   const [replyText, setReplyText] = useState<string>(DEFAULT_WHATSAPP_REPLY);
+  const [latestRecoveryPrompt, setLatestRecoveryPrompt] = useState<string | null>(null);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
   const fetchQueue = useCallback(async () => {
@@ -69,9 +70,14 @@ export default function App() {
       const response = await fetch('/api/webhook/delivery-failure', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ awb: 'DEL12345' }),
+        body: JSON.stringify({
+          awb: 'DEL12345',
+          customer_name: 'Rohan Kapoor',
+          reason_code: 'Customer Unavailable',
+        }),
       });
       const data = (await response.json()) as {
+        generated_whatsapp_text?: string;
         record?: NdrRecord;
         records?: NdrRecord[];
         auditEvents?: AuditEvent[];
@@ -82,6 +88,9 @@ export default function App() {
       }
       if (data.records) setRecords(data.records);
       if (data.auditEvents) setAuditEvents(data.auditEvents);
+      setLatestRecoveryPrompt(
+        data.generated_whatsapp_text ?? data.record?.recoveryPrompt ?? null
+      );
 
       setSelectedAwb('DEL12345');
       setHighlightedAwb('DEL12345');
@@ -107,7 +116,7 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           awb: selectedAwb,
-          rawReply: replyText.trim(),
+          customer_reply: replyText.trim(),
         }),
       });
       const data = (await response.json()) as {
@@ -149,6 +158,7 @@ export default function App() {
       setRecords(nextRecords);
       setAuditEvents(data.auditEvents ?? []);
       setReplyText(DEFAULT_WHATSAPP_REPLY);
+      setLatestRecoveryPrompt(null);
       setHighlightedAwb(null);
       setSelectedRowAwb(null);
       setStatusFilter('all');
@@ -399,6 +409,7 @@ export default function App() {
             isTriggeringWebhook={isTriggeringWebhook}
             isParsingReply={isParsingReply}
             hasTriggeredDel12345={hasTriggeredDel12345}
+            latestRecoveryPrompt={latestRecoveryPrompt}
             errorMessage={errorMessage}
             onDismissError={() => setErrorMessage(null)}
           />

@@ -230,9 +230,19 @@ export function NdrQueueTable({
 
                     <td className="px-4 py-3.5 align-middle">
                       {record.parsedInstructions ? (
-                        <code className="inline-block whitespace-nowrap rounded-md border border-emerald-500/30 bg-[#090D16] px-2.5 py-1 font-mono text-xs text-emerald-300">
-                          {`{Date: ${record.parsedInstructions.Date}, Instruction: ${record.parsedInstructions.Instruction}}`}
-                        </code>
+                        <div className="space-y-1">
+                          {record.parsedIntelligence && (
+                            <div className="text-xs text-slate-400">
+                              <span>Intent: </span>
+                              <span className="font-mono text-slate-200">
+                                {record.parsedIntelligence.intent}
+                              </span>
+                            </div>
+                          )}
+                          <code className="inline-block whitespace-nowrap rounded-md border border-emerald-500/30 bg-[#090D16] px-2.5 py-1 font-mono text-xs text-emerald-300">
+                            {`{Date: ${record.parsedInstructions.Date}, Instruction: ${record.parsedInstructions.Instruction}}`}
+                          </code>
+                        </div>
                       ) : (
                         <span className="text-xs text-slate-500">
                           Awaiting customer reply
@@ -259,10 +269,10 @@ export function NdrQueueTable({
 
       {/* Selected Row Detail Strip */}
       {inspectedRecord && (
-        <div className="border-t border-slate-800/80 bg-[#0B111C] px-5 py-3.5">
-          <div className="flex flex-wrap items-start justify-between gap-4">
-            <div className="space-y-1">
-              <div className="flex items-center gap-2 text-xs text-slate-400">
+        <div className="border-t border-slate-800/80 bg-[#0B111C] px-5 py-4">
+          <div className="flex items-start justify-between gap-4">
+            <div className="space-y-2 text-xs">
+              <div className="flex flex-wrap items-center gap-2 text-slate-400">
                 <span>Selected Shipment</span>
                 <span aria-hidden="true">·</span>
                 <span className="font-mono font-semibold text-slate-200">
@@ -271,14 +281,31 @@ export function NdrQueueTable({
                 <span aria-hidden="true">·</span>
                 <span>{inspectedRecord.customer}</span>
               </div>
-              <p className="text-xs text-slate-300">
-                <span className="text-slate-500">Raw WhatsApp Reply: </span>
+
+              {inspectedRecord.recoveryPrompt && (
+                <p className="text-slate-300">
+                  <span className="text-slate-500">Automated Recovery Prompt: </span>
+                  <span className="text-slate-300">&ldquo;{inspectedRecord.recoveryPrompt}&rdquo;</span>
+                </p>
+              )}
+
+              <p className="text-slate-300">
+                <span className="text-slate-500">Customer WhatsApp Reply: </span>
                 {inspectedRecord.rawReply ? (
                   <span className="italic text-slate-200">&ldquo;{inspectedRecord.rawReply}&rdquo;</span>
                 ) : (
                   <span className="text-slate-500">No customer reply received yet.</span>
                 )}
               </p>
+
+              {inspectedRecord.parsedIntelligence && (
+                <p className="font-mono text-slate-400">
+                  parsed_intelligence:{' '}
+                  <span className="text-emerald-300">
+                    {JSON.stringify(inspectedRecord.parsedIntelligence)}
+                  </span>
+                </p>
+              )}
             </div>
             <button
               type="button"

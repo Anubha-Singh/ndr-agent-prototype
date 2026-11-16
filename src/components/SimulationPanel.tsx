@@ -12,6 +12,7 @@ interface SimulationPanelProps {
   isTriggeringWebhook: boolean;
   isParsingReply: boolean;
   hasTriggeredDel12345: boolean;
+  latestRecoveryPrompt: string | null;
   errorMessage: string | null;
   onDismissError: () => void;
 }
@@ -27,6 +28,7 @@ export function SimulationPanel({
   isTriggeringWebhook,
   isParsingReply,
   hasTriggeredDel12345,
+  latestRecoveryPrompt,
   errorMessage,
   onDismissError,
 }: SimulationPanelProps) {
@@ -44,7 +46,7 @@ export function SimulationPanel({
             Exception Workflow Simulation
           </h2>
           <p className="text-xs text-slate-400">
-            Ingest a carrier delivery failure webhook and parse unstructured WhatsApp replies via Gemini.
+            Ingest a carrier delivery failure webhook, dispatch an automated WhatsApp recovery prompt, and parse replies via Gemini.
           </p>
         </div>
         <div className="text-xs text-slate-400 tabular-nums">
@@ -86,6 +88,13 @@ export function SimulationPanel({
               <span className="text-slate-300">Customer Unavailable</span>
             </p>
           </div>
+
+          {latestRecoveryPrompt && (
+            <div className="rounded-lg border border-slate-800 bg-[#090D16] px-3 py-2 text-xs leading-relaxed text-slate-300">
+              <span className="font-medium text-amber-300">Outbound WhatsApp Prompt: </span>
+              <span>&ldquo;{latestRecoveryPrompt}&rdquo;</span>
+            </div>
+          )}
 
           <div className="flex flex-wrap items-center gap-3">
             <button
