@@ -1,0 +1,6 @@
+{
+  "name": "CargoPulse NDR Control Tower",
+  "description": "Enterprise logistics operations dashboard for real-time delivery exception triage and Gemini-powered customer reply parsing.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
