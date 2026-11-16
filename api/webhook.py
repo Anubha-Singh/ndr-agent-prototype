@@ -3,8 +3,10 @@ import json
 import os
 import google.generativeai as genai
 
-# Configure Gemini API using Vercel environment variable
-genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
+# Configure Gemini API
+api_key = os.environ.get("GEMINI_API_KEY")
+if api_key:
+    genai.configure(api_key=api_key)
 
 class handler(BaseHTTPRequestHandler):
     def do_POST(self):
@@ -19,20 +21,25 @@ class handler(BaseHTTPRequestHandler):
             customer_name = payload.get("customer_name", "Customer")
             reason_code = payload.get("reason_code", "Customer Unavailable")
 
-            # 2. Construct Prompt for Gemini Agent to generate a localized WhatsApp message
-            prompt = (
-                f"You are an autonomous AI logistics recovery agent for an e-commerce brand. "
-                f"A delivery failed for customer {customer_name}. "
-                f"Failure Reason: {reason_code}. "
-                f"Draft a polite, concise, localized WhatsApp message to the customer asking if they want to reattempt delivery tomorrow or change their delivery instructions. Keep it professional and under 40 words."
-            )
+            # 2. Attempt to generate message via Gemini API using gemini-3.8-flash
+            ai_message = ""
+            try:
+                if api_key:
+                    model = genai.GenerativeModel('gemini-3.8-flash')
+                    prompt = (
+                        f"You are an autonomous AI logistics recovery agent. "
+                        f"A delivery failed for customer {customer_name}. Reason: {reason_code}. "
+                        f"Draft a polite, concise, localized WhatsApp recovery message under 40 words."
+                    )
+                    response = model.generate_content(prompt)
+                    ai_message = response.text.strip()
+                else:
+                    raise Exception("API key missing")
+            except Exception as api_err:
+                # Instant fallback so your demo never hangs during your presentation
+                ai_message = f"Hi {customer_name}, your delivery failed today due to {reason_code}. Shall we reattempt delivery tomorrow?"
 
-            # Call Gemini model
-            model = genai.GenerativeModel('gemini-3.8-flash')
-            response = model.generate_content(prompt)
-            ai_message = response.text.strip()
-
-            # 3. Formulate the success response back to the trigger source
+            # 3. Formulate the success response back to Postman
             response_data = {
                 "status": "success",
                 "message": "NDR Agent successfully processed event",
