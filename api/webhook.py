@@ -3,10 +3,9 @@ import json
 import os
 import google.generativeai as genai
 
-# Configure Gemini API (make sure to set your GEMINI_API_KEY in Vercel Environment Variables later)
-# For local testing, you can temporarily paste your key or rely on env variables
-
+# Configure Gemini API using Vercel environment variable
 genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
+
 class handler(BaseHTTPRequestHandler):
     def do_POST(self):
         try:
@@ -19,16 +18,14 @@ class handler(BaseHTTPRequestHandler):
             awb = payload.get("awb", "UNKNOWN")
             customer_name = payload.get("customer_name", "Customer")
             reason_code = payload.get("reason_code", "Customer Unavailable")
-            customer_phone = payload.get("customer_phone", "")
 
             # 2. Construct Prompt for Gemini Agent to generate a localized WhatsApp message
-            prompt = f"""
-            You are an autonomous AI logistics recovery agent for an e-commerce brand.
-            A delivery failed for customer {customer_name}. 
-            Failure Reason: {reason_code}.
-            
-            Draft a polite, concise, localized WhatsApp message to the customer asking if they want to reattempt delivery tomorrow or change their delivery instructions. Keep it professional and under 40 words.
-            """
+            prompt = (
+                f"You are an autonomous AI logistics recovery agent for an e-commerce brand. "
+                f"A delivery failed for customer {customer_name}. "
+                f"Failure Reason: {reason_code}. "
+                f"Draft a polite, concise, localized WhatsApp message to the customer asking if they want to reattempt delivery tomorrow or change their delivery instructions. Keep it professional and under 40 words."
+            )
 
             # Call Gemini model
             model = genai.GenerativeModel('gemini-1.5-flash')
