@@ -28,7 +28,7 @@ class handler(BaseHTTPRequestHandler):
             )
 
             # Call Gemini model
-            model = genai.GenerativeModel('gemini-1.5-flash')
+            model = genai.GenerativeModel('gemini-1.5-pro')
             response = model.generate_content(prompt)
             ai_message = response.text.strip()
 
