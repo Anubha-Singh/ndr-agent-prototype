@@ -127,6 +127,28 @@ function getGenAIClient(): GoogleGenAI {
   });
 }
 
+function formatGeminiError(error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error);
+  if (raw.includes('429') || raw.includes('RESOURCE_EXHAUSTED')) {
+    return 'Gemini API rate limit reached on the free tier. Please wait a few seconds and retry, or check your quota in Settings > Secrets.';
+  }
+  if (raw.includes('503') || raw.includes('UNAVAILABLE')) {
+    return 'Gemini models are temporarily experiencing high demand (503). Please retry in a few seconds.';
+  }
+  if (raw.includes('403') || raw.includes('PERMISSION_DENIED') || raw.includes('API_KEY_INVALID')) {
+    return 'Gemini API key is missing or invalid. Please check your key in Settings > Secrets.';
+  }
+  try {
+    const parsed = JSON.parse(raw) as { error?: { message?: string } };
+    if (parsed?.error?.message) {
+      return parsed.error.message;
+    }
+  } catch {
+    // Raw message is already plain text
+  }
+  return raw || 'Failed to parse customer reply with Gemini.';
+}
+
 async function draftRecoveryMessageWithGemini(
   customerName: string,
   reasonCode: string
@@ -140,18 +162,18 @@ async function draftRecoveryMessageWithGemini(
   try {
     const ai = getGenAIClient();
     const timeoutPromise = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error('Recovery draft timeout')), 4500)
+      setTimeout(() => reject(new Error('Recovery draft timeout')), 3500)
     );
 
     const response = await Promise.race([
       ai.models.generateContent({
-        model: 'gemini-4-hydrogen',
+        model: 'gemini-3.1-flash-lite',
         contents: `A delivery failed for customer ${customerName}. Reason: ${reasonCode}. Draft a polite, concise, localized WhatsApp recovery message under 40 words.`,
         config: {
           systemInstruction:
             'You are an autonomous AI logistics recovery agent. Return only the plain-text WhatsApp recovery message under 40 words, without markdown or quotes.',
           thinkingConfig: {
-            thinkingLevel: ThinkingLevel.LOW,
+            thinkingLevel: ThinkingLevel.MINIMAL,
           },
         },
       }),
@@ -166,104 +188,130 @@ async function draftRecoveryMessageWithGemini(
   }
 }
 
-async function parseReplyWithGemini(rawReply: string): Promise<{
+async function callStructuredParser(
+  model: 'gemini-4-hydrogen' | 'gemini-3.1-flash-lite',
+  rawReply: string,
+  timeoutMs: number
+): Promise<{
   parsedIntelligence: ParsedIntelligence;
   parsedInstructions: ParsedInstruction;
 }> {
   const ai = getGenAIClient();
-  const maxAttempts = 2;
+  const thinkingLevel =
+    model === 'gemini-4-hydrogen' ? ThinkingLevel.LOW : ThinkingLevel.MINIMAL;
+
+  const timeoutPromise = new Promise<never>((_, reject) =>
+    setTimeout(() => reject(new Error(`${model} request timed out`)), timeoutMs)
+  );
+
+  const response = await Promise.race([
+    ai.models.generateContent({
+      model,
+      contents: `Customer Reply: '${rawReply}'`,
+      config: {
+        systemInstruction:
+          "You are a logistics NLP parser. A customer replied to a missed delivery text. Extract the intent and structured re-attempt fields. Return JSON with: 'intent' (must be 'Reschedule', 'Return_To_Origin', or 'Alternate_Instruction'), 'new_date' (the target day/date if mentioned such as 'Friday', or empty string if none), and 'special_instructions' (concise 2-5 word delivery instructions such as 'Leave with guard', or empty string if none).",
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            intent: {
+              type: Type.STRING,
+              description: 'Must be Reschedule, Return_To_Origin, or Alternate_Instruction.',
+            },
+            new_date: {
+              type: Type.STRING,
+              description: "Target day or date if mentioned (e.g. 'Friday'), else empty string.",
+            },
+            special_instructions: {
+              type: Type.STRING,
+              description: "Concise delivery directions (e.g. 'Leave with guard'), else empty string.",
+            },
+          },
+          required: ['intent', 'new_date', 'special_instructions'],
+        },
+        thinkingConfig: {
+          thinkingLevel,
+        },
+      },
+    }),
+    timeoutPromise,
+  ]);
+
+  const text = (response.text ?? '').trim();
+  if (!text) {
+    throw new Error('Gemini returned an empty response.');
+  }
+
+  const parsed = JSON.parse(text) as {
+    intent?: string;
+    new_date?: string | null;
+    special_instructions?: string | null;
+  };
+
+  const validIntents: NdrIntent[] = [
+    'Reschedule',
+    'Return_To_Origin',
+    'Alternate_Instruction',
+  ];
+  const intent: NdrIntent = validIntents.includes(parsed.intent as NdrIntent)
+    ? (parsed.intent as NdrIntent)
+    : 'Alternate_Instruction';
+
+  const newDate = parsed.new_date && parsed.new_date.trim() ? parsed.new_date.trim() : null;
+  const specialInstructions =
+    parsed.special_instructions && parsed.special_instructions.trim()
+      ? parsed.special_instructions.trim()
+      : null;
+
+  const parsedIntelligence: ParsedIntelligence = {
+    intent,
+    new_date: newDate,
+    special_instructions: specialInstructions,
+  };
+
+  const parsedInstructions: ParsedInstruction = {
+    Date: newDate ?? 'Next Business Day',
+    Instruction: specialInstructions ?? intent.replace(/_/g, ' '),
+  };
+
+  return { parsedIntelligence, parsedInstructions };
+}
+
+async function parseReplyWithGemini(rawReply: string): Promise<{
+  parsedIntelligence: ParsedIntelligence;
+  parsedInstructions: ParsedInstruction;
+}> {
+  const candidates: Array<{
+    model: 'gemini-4-hydrogen' | 'gemini-3.1-flash-lite';
+    timeoutMs: number;
+  }> = [
+    { model: 'gemini-3.1-flash-lite', timeoutMs: 12000 },
+    { model: 'gemini-4-hydrogen', timeoutMs: 15000 },
+  ];
+
   let lastError: unknown = null;
 
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+  for (const candidate of candidates) {
     try {
-      const response = await ai.models.generateContent({
-        model: 'gemini-4-hydrogen',
-        contents: `Customer Reply: '${rawReply}'`,
-        config: {
-          systemInstruction:
-            "You are a logistics NLP parser. A customer replied to a missed delivery text. Extract the intent and structured re-attempt fields. 'intent' must be one of 'Reschedule', 'Return_To_Origin', or 'Alternate_Instruction'. 'new_date' must extract the day/date if mentioned (e.g. 'Friday'), else null. 'special_instructions' must extract any specific delivery directions in 2 to 5 words with sentence-case capitalization (e.g. 'Leave with guard'), else null.",
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              intent: {
-                type: Type.STRING,
-                enum: ['Reschedule', 'Return_To_Origin', 'Alternate_Instruction'],
-                description: 'Must be Reschedule, Return_To_Origin, or Alternate_Instruction.',
-              },
-              new_date: {
-                type: Type.STRING,
-                nullable: true,
-                description: "Target day or date if mentioned (e.g. 'Friday'), else null.",
-              },
-              special_instructions: {
-                type: Type.STRING,
-                nullable: true,
-                description: "Concise delivery directions (e.g. 'Leave with guard'), else null.",
-              },
-            },
-            required: ['intent', 'new_date', 'special_instructions'],
-          },
-          thinkingConfig: {
-            thinkingLevel: ThinkingLevel.LOW,
-          },
-        },
-      });
-
-      const text = (response.text ?? '').trim();
-      if (!text) {
-        throw new Error('Gemini returned an empty response.');
-      }
-
-      const parsed = JSON.parse(text) as {
-        intent?: string;
-        new_date?: string | null;
-        special_instructions?: string | null;
-      };
-
-      const validIntents: NdrIntent[] = [
-        'Reschedule',
-        'Return_To_Origin',
-        'Alternate_Instruction',
-      ];
-      const intent: NdrIntent = validIntents.includes(parsed.intent as NdrIntent)
-        ? (parsed.intent as NdrIntent)
-        : 'Alternate_Instruction';
-
-      const newDate = parsed.new_date ? parsed.new_date.trim() : null;
-      const specialInstructions = parsed.special_instructions
-        ? parsed.special_instructions.trim()
-        : null;
-
-      const parsedIntelligence: ParsedIntelligence = {
-        intent,
-        new_date: newDate,
-        special_instructions: specialInstructions,
-      };
-
-      const parsedInstructions: ParsedInstruction = {
-        Date: newDate ?? 'Next Business Day',
-        Instruction: specialInstructions ?? intent.replace(/_/g, ' '),
-      };
-
-      return { parsedIntelligence, parsedInstructions };
+      return await callStructuredParser(candidate.model, rawReply, candidate.timeoutMs);
     } catch (error) {
       lastError = error;
       const errText = error instanceof Error ? error.message : String(error);
-      if (errText.includes('429') || errText.includes('RESOURCE_EXHAUSTED')) {
-        throw new Error(
-          'Gemini API rate limit reached (5 requests/min on free tier). Please wait a few seconds and retry, or upgrade your API key quota in Settings > Secrets.'
-        );
-      }
-      const isTransient503 = errText.includes('503') || errText.includes('UNAVAILABLE');
-      if (!isTransient503 || attempt === maxAttempts) {
+      const shouldFallback =
+        errText.includes('503') ||
+        errText.includes('429') ||
+        errText.includes('UNAVAILABLE') ||
+        errText.includes('RESOURCE_EXHAUSTED') ||
+        errText.includes('timed out');
+      if (!shouldFallback) {
         break;
       }
-      await new Promise((resolve) => setTimeout(resolve, 700));
+      console.warn(`Parser model ${candidate.model} unavailable (${errText}), trying next model.`);
     }
   }
 
-  throw lastError instanceof Error ? lastError : new Error('Failed to parse reply with Gemini.');
+  throw new Error(formatGeminiError(lastError));
 }
 
 async function startServer() {
